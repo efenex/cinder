@@ -3932,8 +3932,10 @@ class HPE3PARCommon(object):
             vol_name = self._get_3par_vol_name(volume['id'])
 
             # Create remote copy group on main array.
+            # 'sync_target2' added to enable Peer Persistence on these volumes
             rcg_targets = []
             sync_targets = []
+            sync_targets2 = []
             for target in self._replication_targets:
                 # Only add targets that match the volumes replication mode.
                 if target['replication_mode'] == replication_mode_num:
@@ -3946,7 +3948,10 @@ class HPE3PARCommon(object):
                     rcg_targets.append(rcg_target)
                     sync_target = {'targetName': target['backend_id'],
                                    'syncPeriod': replication_sync_period}
+                    sync_target2 = {'targetName': target['backend_id'],
+                                   'policies': {'autoRecover': True, 'autoFailover': True, 'pathManagement': True}}
                     sync_targets.append(sync_target)
+                    sync_targets2.append(sync_target2)
 
             optional = {'localSnapCPG': vol_settings['snap_cpg'],
                         'localUserCPG': local_cpg}
@@ -3986,6 +3991,8 @@ class HPE3PARCommon(object):
 
             # Check and see if we are in periodic mode. If we are, update
             # Remote Copy Group to have a sync period.
+            # If they are sync mode, add the necessary options for Peer
+            # Persistence.
             if replication_sync_period and (
                replication_mode_num == self.PERIODIC):
                 opt = {'targets': sync_targets}
@@ -3993,6 +4000,16 @@ class HPE3PARCommon(object):
                     self.client.modifyRemoteCopyGroup(rcg_name, opt)
                 except Exception as ex:
                     msg = (_("There was an error setting the sync period for "
+                             "the remote copy group: %s.") %
+                           six.text_type(ex))
+                    LOG.error(msg)
+                    raise exception.VolumeBackendAPIException(data=msg)
+            else:
+                opt = {'targets': sync_targets2}
+                try:
+                    self.client.modifyRemoteCopyGroup(rcg_name, opt)
+                except Exception as ex:
+                    msg = (_("There was an error setting the peer persistence for "
                              "the remote copy group: %s.") %
                            six.text_type(ex))
                     LOG.error(msg)

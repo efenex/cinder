@@ -47,6 +47,10 @@ LOG = logging.getLogger(__name__)
 # EXISTENT_PATH error code returned from hpe3parclient
 EXISTENT_PATH = 73
 
+def merge_dols(dol1, dol2):
+  keys = set(dol1).union(dol2)
+  no = []
+  return dict((k, dol1.get(k, no) + dol2.get(k, no)) for k in keys)
 
 @interface.volumedriver
 class HPE3PARFCDriver(hpebasedriver.HPE3PARDriverBase):
@@ -164,6 +168,7 @@ class HPE3PARFCDriver(hpebasedriver.HPE3PARDriverBase):
           * Create a VLUN for that HOST with the volume we want to export.
 
         """
+        info = {}
         array_id = self.get_volume_replication_driver_data(volume)
         common = self._login(array_id=array_id)
         try:
@@ -194,18 +199,77 @@ class HPE3PARFCDriver(hpebasedriver.HPE3PARDriverBase):
             else:
                 vlun = existing_vlun
 
-            info = {'driver_volume_type': 'fibre_channel',
+
+            info1 = {'driver_volume_type': 'fibre_channel',
                     'data': {'target_lun': vlun['lun'],
                              'target_discovered': True,
                              'target_wwn': target_wwns,
                              'initiator_target_map': init_targ_map}}
 
             encryption_key_id = volume.get('encryption_key_id', None)
-            info['data']['encrypted'] = encryption_key_id is not None
-            fczm_utils.add_fc_zone(info)
-            return info
+            info1['data']['encrypted'] = encryption_key_id is not None
+            fczm_utils.add_fc_zone(info1)
+            #return info
+            replication_targets = common._replication_targets
+            info = info1
         finally:
             self._logout(common)
+
+        if volume.replication_status != "enabled":
+            return info
+
+        for repl in replication_targets:
+            array_id = repl['id']
+            # force login to secondary array
+            try:
+                common = self._login(array_id=array_id)
+                common.client.logout() # we do not actually need a connection to the primary
+                common.client = common._create_replication_client(repl)
+                # we have to make sure we have a host
+                host = self._create_host(common, volume, connector)
+                target_wwns, init_targ_map, numPaths = \
+                    self._build_initiator_target_map(common, connector)
+                if not connector.get('multipath'):
+                    target_wwns = target_wwns[:1]
+                    initiator = connector.get('wwpns')[0]
+                    init_targ_map[initiator] = init_targ_map[initiator][:1]
+                # check if a VLUN already exists for this host
+                existing_vlun = common.find_existing_vlun(volume, host)
+
+                vlun = None
+                if existing_vlun is None:
+                    # now that we have a host, create the VLUN
+                    if self.lookup_service is not None and numPaths == 1:
+                        nsp = None
+                        active_fc_port_list = common.get_active_fc_target_ports()
+                        for port in active_fc_port_list:
+                            if port['portWWN'].lower() == target_wwns[0].lower():
+                                nsp = port['nsp']
+                                break
+                        vlun = common.create_vlun(volume, host, nsp)
+                    else:
+                        vlun = common.create_vlun(volume, host)
+                else:
+                    vlun = existing_vlun
+
+                info2 = {'driver_volume_type': 'fibre_channel',
+                        'data': {'target_lun': vlun['lun'],
+                                 'target_discovered': True,
+                                 'target_wwn': target_wwns,
+                                 'initiator_target_map': init_targ_map}}
+
+                encryption_key_id = volume.get('encryption_key_id', None)
+                info2['data']['encrypted'] = encryption_key_id is not None
+                fczm_utils.add_fc_zone(info2)
+                info = {'driver_volume_type': 'fibre_channel',
+                       'data': {'target_lun': info['data']['target_lun'],
+                                'target_discovered': True,
+                                'target_wwn': info['data']['target_wwn'] + info2['data']['target_wwn'],
+                                'initiator_target_map': merge_dols(info['data']['initiator_target_map'], info2['data']['initiator_target_map'])}}
+            finally:
+                self._logout(common)
+
+        return(info)
 
     @utils.trace
     def terminate_connection(self, volume, connector, **kwargs):
@@ -239,7 +303,7 @@ class HPE3PARFCDriver(hpebasedriver.HPE3PARDriverBase):
                                 zone_remove = False
                                 break
 
-            info = {'driver_volume_type': 'fibre_channel',
+            info1 = {'driver_volume_type': 'fibre_channel',
                     'data': {}}
 
             if zone_remove:
@@ -248,13 +312,73 @@ class HPE3PARFCDriver(hpebasedriver.HPE3PARDriverBase):
                 target_wwns, init_targ_map, _numPaths = \
                     self._build_initiator_target_map(common, connector)
 
-                info['data'] = {'target_wwn': target_wwns,
+                info1['data'] = {'target_wwn': target_wwns,
                                 'initiator_target_map': init_targ_map}
-                fczm_utils.remove_fc_zone(info)
-            return info
+                fczm_utils.remove_fc_zone(info1)
+            #return info
+            replication_targets = common._replication_targets
 
         finally:
             self._logout(common)
+
+        info = info1
+
+        if volume.replication_status != "enabled":
+            return info
+
+        for repl in replication_targets:
+            array_id = repl['id']
+            common = self._login(array_id=array_id)
+            common.client.logout() # we do not actually need a connection to the primary
+            # force login to secondary array
+            common.client = common._create_replication_client(repl)
+            try:
+                is_force_detach = connector is None
+                if is_force_detach:
+                    common.terminate_connection(volume, None, None)
+                    # TODO(sonivi): remove zones, if not required
+                    # for now, do not remove zones
+                    zone_remove = False
+                else:
+                    hostname = common._safe_hostname(connector['host'])
+                    common.terminate_connection(volume, hostname,
+                                                wwn=connector['wwpns'])
+
+                    zone_remove = True
+                    try:
+                        vluns = common.client.getHostVLUNs(hostname)
+                    except hpeexceptions.HTTPNotFound:
+                        # No more exports for this host.
+                        pass
+                    else:
+                        # Vlun exists, so check for wwpn entry.
+                        for wwpn in connector.get('wwpns'):
+                            for vlun in vluns:
+                                if (vlun.get('active') and
+                                        vlun.get('remoteName') == wwpn.upper()):
+                                    zone_remove = False
+                                    break
+
+                info2 = {'driver_volume_type': 'fibre_channel',
+                        'data': {}}
+
+                if zone_remove:
+                    LOG.info("Need to remove FC Zone, building initiator "
+                             "target map")
+                    target_wwns, init_targ_map, _numPaths = \
+                        self._build_initiator_target_map(common, connector)
+
+                    info2['data'] = {'target_wwn': target_wwns,
+                                    'initiator_target_map': init_targ_map}
+                    fczm_utils.remove_fc_zone(info2)
+
+            finally:
+                self._logout(common)
+                info = {'driver_volume_type': 'fibre_channel',
+                       'data': {'target_wwn': info['data']['target_wwn'] + info2['data']['target_wwn'],
+                                'initiator_target_map': merge_dols(info['data']['initiator_target_map'], info2['data']['initiator_target_map'])}}
+
+        return(info)
 
     def _build_initiator_target_map(self, common, connector):
         """Build the target_wwns and the initiator target map."""
