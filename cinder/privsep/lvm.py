@@ -1,6 +1,4 @@
-# Copyright (c) 2012 NTT.
-# Copyright (c) 2012 OpenStack Foundation
-# All Rights Reserved.
+# Copyright 2018 Red Hat, Inc
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,15 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""The Create Volume from Image extension."""
+"""
+Helpers for lvm related routines
+"""
+
+from oslo_concurrency import processutils
+
+import cinder.privsep
 
 
-from cinder.api import extensions
-
-
-class Image_create(extensions.ExtensionDescriptor):
-    """Allow creating a volume from an image in the Create Volume v1 API."""
-
-    name = "CreateVolumeExtension"
-    alias = "os-image-create"
-    updated = "2012-08-13T00:00:00+00:00"
+@cinder.privsep.sys_admin_pctxt.entrypoint
+def udevadm_settle():
+    processutils.execute('udevadm', 'settle')

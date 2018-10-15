@@ -107,12 +107,6 @@ scaleio_opts = [
                  default=10.0,
                  help='max_over_subscription_ratio setting for the driver. '
                       'Maximum value allowed is 10.0.'),
-    cfg.BoolOpt('sio_allow_non_padded_thick_volumes',
-                default=False,
-                help='Allow thick volumes to be created in Storage Pools '
-                     'when zero padding is disabled. This option should '
-                     'not be enabled if multiple tenants will utilize '
-                     'thick volumes from a shared Storage Pool.'),
     cfg.BoolOpt('sio_allow_non_padded_volumes',
                 default=False,
                 help='Allow volumes to be created in Storage Pools '
@@ -326,7 +320,7 @@ class ScaleIODriver(driver.VolumeDriver):
             if not padded:
                 LOG.warning("Zero padding is disabled for pool, %s. "
                             "This could lead to existing data being "
-                            "accessible on new thick provisioned volumes. "
+                            "accessible on new provisioned volumes. "
                             "Consult the ScaleIO product documentation "
                             "for information on how to enable zero padding "
                             "and prevent this from occurring.",
@@ -500,8 +494,7 @@ class ScaleIODriver(driver.VolumeDriver):
 
     def _is_volume_creation_safe(self,
                                  protection_domain,
-                                 storage_pool,
-                                 provision_type):
+                                 storage_pool):
         """Checks if volume creation is safe or not.
 
         Using volumes with zero padding disabled can lead to existing data
@@ -510,11 +503,6 @@ class ScaleIODriver(driver.VolumeDriver):
         # if we have been told to allow unsafe volumes
         if self.configuration.sio_allow_non_padded_volumes:
             # Enabled regardless of type, so safe to proceed
-            return True
-
-        if (provision_type == 'ThickProvisioned' and
-                self.configuration.sio_allow_non_padded_thick_volumes):
-            # Enabled for thick volumes
             return True
 
         try:
@@ -612,16 +600,14 @@ class ScaleIODriver(driver.VolumeDriver):
             provisioning = "ThickProvisioned"
 
         allowed = self._is_volume_creation_safe(protection_domain_name,
-                                                storage_pool_name,
-                                                provisioning)
+                                                storage_pool_name)
         if not allowed:
-            # Do not allow thick volume creation on this backend.
+            # Do not allow volume creation on this backend.
             # Volumes may leak data between tenants.
             LOG.error("Volume creation rejected due to "
                       "zero padding being disabled for pool, %s:%s. "
                       "This behaviour can be changed by setting "
                       "the configuration option "
-                      "sio_allow_non_padded_thick_volumes = True or"
                       "sio_allow_non_padded_volumes = True.",
                       protection_domain_name,
                       storage_pool_name)
@@ -797,7 +783,15 @@ class ScaleIODriver(driver.VolumeDriver):
                  {'volname': volume_id,
                   'snapname': snapname})
 
-        return self._snapshot_volume(volume_id, snapname)
+        ret = self._snapshot_volume(volume_id, snapname)
+        if volume.size > snapshot.volume_size:
+            LOG.info("Extending volume %(vol)s to size %(size)s",
+                     {'vol': ret['provider_id'],
+                      'size': volume.size})
+            self._extend_volume(ret['provider_id'],
+                                snapshot.volume_size, volume.size)
+
+        return ret
 
     @staticmethod
     def _get_headers():

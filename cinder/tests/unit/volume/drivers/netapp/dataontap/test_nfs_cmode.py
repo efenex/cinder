@@ -307,7 +307,7 @@ class NetAppCmodeNfsDriverTestCase(test.TestCase):
             self.driver.zapi_client, 'get_operational_lif_addresses',
             return_value=[fake.SHARE_IP])
         mock_resolve_hostname = self.mock_object(
-            na_utils, 'resolve_hostname', return_value=fake.SHARE_IP)
+            utils, 'resolve_hostname', return_value=fake.SHARE_IP)
         mock_get_flexvol = self.mock_object(
             self.driver.zapi_client, 'get_flexvol',
             return_value={'name': fake.NETAPP_VOLUME})
@@ -330,7 +330,7 @@ class NetAppCmodeNfsDriverTestCase(test.TestCase):
         self.mock_object(self.driver.zapi_client,
                          'get_operational_lif_addresses',
                          return_value=[])
-        self.mock_object(na_utils,
+        self.mock_object(utils,
                          'resolve_hostname',
                          return_value=fake.SHARE_IP)
 
@@ -344,7 +344,7 @@ class NetAppCmodeNfsDriverTestCase(test.TestCase):
         self.mock_object(self.driver.zapi_client,
                          'get_operational_lif_addresses',
                          return_value=[fake.SHARE_IP])
-        self.mock_object(na_utils,
+        self.mock_object(utils,
                          'resolve_hostname',
                          return_value=fake.SHARE_IP)
         side_effect = exception.VolumeBackendAPIException(data='fake_data')
@@ -1129,18 +1129,20 @@ class NetAppCmodeNfsDriverTestCase(test.TestCase):
             fake.EXPORT_PATH, fake.IMAGE_FILE_ID, fake.VOLUME['name'],
             fake.VSERVER_NAME, dest_exists=True)
 
-    def test_get_source_ip_and_path(self):
+    @ddt.data((fake.NFS_SHARE, fake.SHARE_IP),
+              (fake.NFS_SHARE_IPV6, fake.IPV6_ADDRESS))
+    @ddt.unpack
+    def test_get_source_ip_and_path(self, share, ip):
         self.driver._get_ip_verify_on_cluster = mock.Mock(
-            return_value=fake.SHARE_IP)
+            return_value=ip)
 
         src_ip, src_path = self.driver._get_source_ip_and_path(
-            fake.NFS_SHARE, fake.IMAGE_FILE_ID)
+            share, fake.IMAGE_FILE_ID)
 
-        self.assertEqual(fake.SHARE_IP, src_ip)
+        self.assertEqual(ip, src_ip)
         assert_path = fake.EXPORT_PATH + '/' + fake.IMAGE_FILE_ID
         self.assertEqual(assert_path, src_path)
-        self.driver._get_ip_verify_on_cluster.assert_called_once_with(
-            fake.SHARE_IP)
+        self.driver._get_ip_verify_on_cluster.assert_called_once_with(ip)
 
     def test_get_destination_ip_and_path(self):
         self.driver._get_ip_verify_on_cluster = mock.Mock(
